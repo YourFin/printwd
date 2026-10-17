@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 
@@ -13,19 +14,19 @@ const mem = std.mem;
 ///
 /// ONLY VALID FOR KERNEL >= 2.6.4
 const Dirent = extern struct {
-    pub const DType = struct {
-        /// TODO: https://codeberg.org/ziglang/zig/issues/36082
-        /// Use c unsigned char
-        pub const T = u8;
+    /// TODO: https://codeberg.org/ziglang/zig/issues/36082
+    /// Use c unsigned char
+    pub const DType = enum(u8) {
         // https://github.com/torvalds/linux/blob/72d3fcf802c45d00b300f25b848a93c3a2bd7c7e/tools/include/nolibc/types.h#L78
-        pub const unknown: T = 0x0;
-        pub const fifo: T = 0x1;
-        pub const chr: T = 0x2;
-        pub const dir: T = 0x4;
-        pub const blk: T = 0x6;
-        pub const reg: T = 0x8;
-        pub const lnk: T = 0xa;
-        pub const sock: T = 0xc;
+        unknown = 0x0,
+        fifo = 0x1,
+        chr = 0x2,
+        dir = 0x4,
+        blk = 0x6,
+        reg = 0x8,
+        lnk = 0xa,
+        sock = 0xc,
+        _,
     };
 
     /// Inode number
@@ -39,7 +40,7 @@ const Dirent = extern struct {
     d_reclen: c_ushort,
     /// Type of this linux_dirent
     /// Not always present - must handle unknown case
-    d_type: DType.T,
+    d_type: DType,
     /// Filename placeholder
     /// This is mostly here as a way to grab
     /// a pointer to this address for the
@@ -53,15 +54,20 @@ const Dirent = extern struct {
     /// string with null bytes to maintain alignment
     d_name: u8,
 
-    pub fn name(self: *align(1) const Dirent) [:0]const u8 {
-        //std.log.err("{}, {}, {s}\n", .{ self.d_reclen, @offsetOf(Dirent, "d_name"), self.d_name });
-        return @as([*:0]const u8, @ptrCast(&(self.d_name)))[0..(self.d_reclen - 2 - @offsetOf(Dirent, "d_name"))];
+    /// Get the name of this directory.
+    ///
+    /// NOTE: the return value will be PADDED WITH NULL BYTES
+    /// out such that the next entry in the buffer aligns
+    /// appropriately.
+    pub fn name(self: *const Dirent) []const u8 {
+        const d_name_ptr: [*]const u8 = @ptrCast(&(self.d_name));
+        return d_name_ptr[0..(self.d_reclen - 2 - @offsetOf(Dirent, "d_name"))];
     }
 };
 
 pub const LsIterator = struct {
     fd: i32,
-    buf: []u8,
+    buf: []align(@alignOf(Dirent)) u8,
     state: union(enum) {
         pending: void,
         available: struct {
@@ -70,17 +76,24 @@ pub const LsIterator = struct {
         },
     },
 
-    pub fn next(this: *LsIterator) !?*align(1) Dirent {
+    /// Note:
+    pub fn next(this: *LsIterator) !?*Dirent {
         switch (this.state) {
             .pending => {
-                const result = getdents64(this.fd, this.buf.ptr, this.buf.len);
-                std.log.err("read bytes: {}", .{result});
-                if (result == 0) {
-                    return null;
-                }
-                const code = errno(result);
-                if (code != E.SUCCESS) {
+                var result: usize = undefined;
+                while (true) {
+                    result = getdents64(this.fd, this.buf.ptr, this.buf.len);
+                    if (result == 0) {
+                        return null;
+                    }
+                    const code = errno(result);
+                    if (code == E.SUCCESS) {
+                        break;
+                    }
                     return switch (code) {
+                        // Syscall interrupted; e.g. process signaled
+                        // while waiting on disk io
+                        E.INTR => continue,
                         // Invalid file descriptor
                         E.BADF => error.BADF,
 
@@ -106,11 +119,12 @@ pub const LsIterator = struct {
                 return @ptrCast(this.buf.ptr);
             },
             .available => |*state| {
-                const prev: *align(1) Dirent = @ptrCast(&this.buf[state.offset]);
+                const prev: *Dirent = @ptrCast(@alignCast(&this.buf[state.offset]));
                 const new_offset = state.offset + prev.d_reclen;
                 if (new_offset < state.read_size) {
                     state.*.offset = new_offset;
-                    return @ptrCast(this.buf.ptr + state.*.offset);
+                    assert(state.offset % @alignOf(Dirent) == 0);
+                    return @ptrCast(@alignCast(this.buf.ptr + state.offset));
                 } else {
                     this.*.state = .pending;
                     return this.next();
@@ -123,8 +137,8 @@ pub const LsIterator = struct {
 /// Note: Dirent entries are backed by `buf`,
 /// and only valid until the next call to `next`.
 ///
-/// They need to be copied if not drained immediately
-pub fn ls(buf: []u8, fd: i32) LsIterator {
+/// They need to be copied if not consumed immediately
+pub fn ls(buf: []align(@alignOf(Dirent)) u8, fd: i32) LsIterator {
     return LsIterator{
         .fd = fd,
         .buf = buf,
@@ -132,7 +146,7 @@ pub fn ls(buf: []u8, fd: i32) LsIterator {
     };
 }
 
-test {
+test "run ls" {
     const ret = std.os.linux.open("/home/pen/", std.os.linux.O{
         .DIRECTORY = true,
         .CREAT = false,
@@ -142,13 +156,16 @@ test {
         const i: isize = @bitCast(ret);
         break :fd @as(i32, @intCast(i));
     };
-    std.log.err("fd: {}", .{fd});
 
     defer _ = std.os.linux.close(fd);
 
-    var buf: [2048]u8 = undefined;
+    var buf: [2048]u8 align(@alignOf(Dirent)) = undefined;
     var ls_iter = ls(&buf, fd);
     while (try ls_iter.next()) |dirent| {
-        std.log.err("inode: {}\toff: {}\treclen: {}\ttype: {s}\tname: {s}", .{ dirent.d_ino, dirent.d_off, dirent.d_reclen, dirent.d_type, dirent.name() });
+        std.log.warn("inode: {}\toff: {}\treclen: {}\ttype: {}\tname: {s}", .{ dirent.d_ino, dirent.d_off, dirent.d_reclen, dirent.d_type, dirent.name() });
     }
+}
+
+test "Dirent alignment is still 8" {
+    try std.testing.expectEqual(@alignOf(Dirent) % 8, 0);
 }
