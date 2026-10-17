@@ -48,6 +48,8 @@ pub const Result = struct {
 /// - Results must be safe to render
 /// - Don't depend on this function to be *perfect* on actual rendered width.
 ///   We do our best, but perfection is impossible without access to the font.
+///
+/// MUST validate that all paths don't contain a null byte
 pub fn printwd(io: Io, alloc: Allocator, home_dir: ?[]u8, wd: []u8, target_grapheme_width: u64) Error!Result {
 
     return .{};
