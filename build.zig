@@ -1,8 +1,21 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const profile_build = b.option(bool, "profile-build",
+        \\Build for profiling
+        \\
+        \\Prevents inlining of some syscalls so they
+        \\will show up in the stack, and prevents stripping
+    ) orelse false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "profile_build", profile_build);
+
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize: std.builtin.OptimizeMode = switch (b.standardOptimizeOption(.{})) {
+        .Debug => if (profile_build) .ReleaseFast else .Debug,
+        else => |opt| opt,
+    };
 
     const exe = b.addExecutable(.{
         .name = "template",
@@ -10,8 +23,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = if (profile_build) false else null,
         }),
     });
+    exe.root_module.addOptions("build-flags", options);
 
     b.installArtifact(exe);
 
@@ -31,11 +46,15 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |test_target| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(test_target),
+            .optimize = optimize,
+            .strip = if (profile_build) false else null,
+        });
+        mod.addOptions("build-flags", options);
         const unit_tests = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = b.resolveTargetQuery(test_target),
-            }),
+            .root_module = mod,
         });
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
