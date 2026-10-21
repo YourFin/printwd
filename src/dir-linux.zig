@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("build-flags");
+const bloom = @import("bloom-filter.zig");
 
 const assert = std.debug.assert;
 
-inline fn getdents64(fd: i32, dirp: [*]u8, len: usize) usize {
+inline fn getdents64(fd: i32, dirp: [*]u8, len: c_uint) usize {
     return @call(if (config.profile_build) .never_inline else .auto, std.os.linux.getdents64, .{ fd, dirp, len });
 }
 const errno = std.os.linux.errno;
@@ -163,7 +164,7 @@ pub const LsIterator = struct {
             .pending => {
                 var result: usize = undefined;
                 while (true) {
-                    result = getdents64(this.fd, this.buf.ptr, this.buf.len);
+                    result = getdents64(this.fd, this.buf.ptr, @intCast(this.buf.len));
                     if (result == 0) {
                         return null;
                     }
@@ -319,7 +320,7 @@ test "walk whole filesystem dirs only" {
     defer iter_pool.deinit(gpa);
     try iter_pool.addCapacity(gpa, init_capacity);
 
-    var buf_pool = std.heap.MemoryPoolAligned([2 << 10]u8, std.mem.Alignment.fromByteUnits(Dirent.buffer_align)).empty;
+    var buf_pool = std.heap.memory_pool.Aligned([2 << 10]u8, std.mem.Alignment.fromByteUnits(Dirent.buffer_align)).empty;
     defer buf_pool.deinit(gpa);
     try buf_pool.addCapacity(gpa, init_capacity);
 

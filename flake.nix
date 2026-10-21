@@ -29,12 +29,13 @@
         overlays = [
           (final: prev: rec {
             zigpkgs = zig-overlay.packages.${prev.system};
-            zig = zig-overlay.packages.${prev.system}."0.16.0";
+            zig = zig-overlay.packages.${prev.system}."0.17.0";
           })
         ];
         pkgs = import nixpkgs { inherit overlays system; };
         nativeBuildInputs = with pkgs; [
           pkgs.zig
+          postgresql
           zls
         ];
         buildInputs = with pkgs; [ ];
