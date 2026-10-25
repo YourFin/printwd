@@ -3,6 +3,27 @@ const math = std.math;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const count, const out = args: {
+        var iter = init.minimal.args.iterate();
+        _ = iter.next() orelse {
+            std.process.fatal("No command line argument provided", .{});
+        };
+        const arg = iter.next() orelse {
+            std.process.fatal("No command line argument provided", .{});
+        };
+        const parsed = std.fmt.parseInt(u64, arg, 10) catch |err| {
+            std.process.fatal("Error parsing command line: {}", .{err});
+        };
+
+        const file = if (iter.next()) |fname|
+            try std.Io.Dir.createFile(std.Io.Dir.cwd(), io, fname, .{ .read = true, .truncate = true })
+        else
+            std.Io.File.stdout();
+
+        break :args .{ parsed, file };
+    };
+    defer out.close(io);
+
     var safe = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
     defer {
         const leak_count = safe.deinit();
@@ -15,22 +36,33 @@ pub fn main(init: std.process.Init) !void {
     // stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
     // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    var out_buffer: [1024]u8 = undefined;
+    var out_writer = out.writer(io, &out_buffer);
+    const output = &out_writer.interface;
 
     var p: ?u32 = undefined;
     var gen = SieveOfEratosthenes(u32).init();
     defer gen.deinit(gpa);
-    for (0..1_000_000) |_| {
-        p = try gen.next(gpa);
-    }
-    try stdout.print("{?}\n", .{p});
 
-    try stdout.flush();
+    const progress_interval = 1_000_000;
+    const node = std.Progress.start(io, .{ .root_name = "Calculating..." });
+    defer node.end();
+    node.setEstimatedTotalItems(count / progress_interval);
+    for (0..count) |_| {
+        p = try gen.next(gpa) orelse break;
+        try output.writeInt(u32, p.?, .little);
+        if (count % progress_interval == 0) {
+            node.completeOne();
+        }
+    }
+
+    try output.flush();
 }
 
 // Calculates primes up to max(usize)
+// Testing:
+//  - Made sure this was faster than the python
+//    impl on stackoverflow (~10x)
 pub fn SieveOfEratosthenes(comptime T: type) type {
     const max: usize = switch (@typeInfo(T)) {
         .int => math.maxInt(T),
@@ -43,6 +75,7 @@ pub fn SieveOfEratosthenes(comptime T: type) type {
             is_prime: std.bit_set.Dynamic,
             is_prime_idx: usize,
             q: T,
+            prev_q: T,
         } },
 
         pub fn init() @This() {
@@ -62,8 +95,10 @@ pub fn SieveOfEratosthenes(comptime T: type) type {
             }
         }
 
+        /// Only errors on OOM
+        /// Will return `null` when primes no longer fit in
+        /// the provided numeric type with full precision
         pub fn next(self: *@This(), alloc: std.mem.Allocator) !?T {
-            //@breakpoint();
             switch (self.state) {
                 .init => {
                     self.*.state = .{
@@ -76,6 +111,7 @@ pub fn SieveOfEratosthenes(comptime T: type) type {
                             },
                             .is_prime_idx = 0,
                             .q = 2,
+                            .prev_q = 0,
                         },
                     };
                     return self.next(alloc);
@@ -91,17 +127,22 @@ pub fn SieveOfEratosthenes(comptime T: type) type {
                     }
 
                     // Find next q
+                    s.*.prev_q = s.q;
                     s.*.q += 1;
                     while (!s.is_prime.isSet(s.q)) : (s.*.q += 1) {}
 
                     // Expand is_prime
+                    if (s.q > @trunc(@sqrt(@as(f128, @floatFromInt(math.maxInt(usize)))))) {
+                        return null;
+                    }
+                    s.is_prime.resize(allocator: Allocator, new_len: usize, fill: bool)
                     try s.is_prime.resize(alloc, s.q * s.q, true);
                     var p: usize = first_prime;
                     while (p <= s.q) : (p += 1) {
                         if (!s.is_prime.isSet(s.q)) {
                             continue;
                         }
-                        var i: usize = 1;
+                        var i: usize = (s.prev_q * s.prev_q) / p;
                         while (p * i < s.is_prime.bit_length) : (i += 1) {
                             s.is_prime.unset(p * i);
                         }
