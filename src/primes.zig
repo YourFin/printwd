@@ -130,7 +130,7 @@ pub fn SieveOfEratosthenes(comptime T: type) type {
                             //
                             // Attempting to just resize to q_sqr with a general
                             // purpose allocator will thrash hard with copy resizing
-                            // over it's exponential allocation regime
+                            // over its exponential allocation regime
                             try s.is_prime.resize(alloc, @min(s.is_prime.bit_length * 2, self.max_bitsize), true);
                         }
                     }
